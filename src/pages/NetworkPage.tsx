@@ -48,6 +48,14 @@ export function NetworkPage() {
 
   const selectedNode = resourceMap.get(selectedId) ?? resources[0];
 
+  if (!selectedNode) {
+    return (
+      <div className="rounded-2xl border border-slate-800 bg-[#0a162b] p-8 text-center text-sm text-slate-400">
+        No campus resource nodes available.
+      </div>
+    );
+  }
+
   const upstreamEdges = useMemo(
     () => edges.filter((e) => e.to === selectedId),
     [edges, selectedId]

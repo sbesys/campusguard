@@ -1,19 +1,34 @@
 import React, {
   createContext,
   useContext,
-  useMemo,
-  useState,
   useEffect,
+  useMemo,
+  useRef,
+  useState,
 } from 'react';
-import { supabase } from '../lib/supabase';
 import {
   INITIAL_ALERTS,
   INITIAL_BUILDINGS,
   INITIAL_RECOVERY_TASKS,
   INITIAL_RESOURCES,
   RESOURCE_EDGES,
+  SIMULATION_PRESETS,
   TELEMETRY_HISTORY,
 } from '../data/campusData';
+import {
+  acknowledgeResourceAlertsInDb,
+  deleteAlertFromDb,
+  fetchAllCampusData,
+  insertAlertsToDb,
+  insertSimulationRecord,
+  insertTelemetryPointInDb,
+  resetTwinBaselineInDb,
+  syncRecoveryTasksFromSimulation,
+  updateAlertAckInDb,
+  updateChangedBuildings,
+  updateChangedResources,
+  updateRecoveryTaskStatusInDb,
+} from '../services/campusDb';
 import {
   AlertItem,
   Building,
@@ -22,6 +37,7 @@ import {
   ResourceEdge,
   ResourceId,
   ResourceNode,
+  SimulationPreset,
   SimulationResult,
   StatusLevel,
   TelemetryPoint,
@@ -36,11 +52,15 @@ interface CampusContextValue {
   setActivePage: (page: PageId) => void;
   resources: ResourceNode[];
   resourceLoading: boolean;
-resourceError: string | null;
+  resourceError: string | null;
+  isSyncing: boolean;
+  dbWarning: string | null;
+  clearDbWarning: () => void;
   edges: ResourceEdge[];
   buildings: Building[];
   alerts: AlertItem[];
   recoveryTasks: RecoveryTask[];
+  simulationPresets: SimulationPreset[];
   telemetry: TelemetryPoint[];
   healthScore: number;
   lastSimulation: SimulationResult | null;
@@ -51,11 +71,11 @@ resourceError: string | null;
     severity: Exclude<StatusLevel, 'operational'>,
     durationMinutes: number
   ) => SimulationResult;
-  applySimulationToTwin: (result: SimulationResult) => void;
-  advanceRecoveryTask: (taskId: string) => void;
-  toggleAcknowledgeAlert: (alertId: string) => void;
-  dismissAlert: (alertId: string) => void;
-  resetDigitalTwin: () => void;
+  applySimulationToTwin: (result: SimulationResult) => Promise<void>;
+  advanceRecoveryTask: (taskId: string) => Promise<void>;
+  toggleAcknowledgeAlert: (alertId: string) => Promise<void>;
+  dismissAlert: (alertId: string) => Promise<void>;
+  resetDigitalTwin: () => Promise<void>;
   jumpToSimulateResource: (resourceId: ResourceId) => void;
 }
 
@@ -66,43 +86,7 @@ const STATUS_RANK: Record<StatusLevel, number> = {
   degraded: 1,
   critical: 2,
 };
-interface ResourceRow {
-  id: string;
-  name: string;
-  status: string | null;
-  load_percent: number | null;
-  location: string | null;
-  description: string | null;
-  short_name: string | null;
-  category: string | null;
-  capacity_label: string | null;
-  backup_buffer_minutes: number | null;
-  criticality_weight: number | null;
-  owner_unit: string | null;
-  x: number | null;
-  y: number | null;
-  metrics: { label: string; value: string }[] | null;
-}
 
-function mapResourceRow(row: ResourceRow): ResourceNode {
-  return {
-    id: row.id as ResourceId,
-    name: row.name,
-    shortName: row.short_name ?? row.name,
-    category: row.category as ResourceNode['category'],
-    status: (row.status ?? 'operational') as StatusLevel,
-    loadPercent: row.load_percent ?? 0,
-    capacityLabel: row.capacity_label ?? '',
-    backupBufferMinutes: row.backup_buffer_minutes ?? 0,
-    criticalityWeight: Number(row.criticality_weight ?? 0),
-    ownerUnit: row.owner_unit ?? '',
-    location: row.location ?? '',
-    description: row.description ?? '',
-    x: Number(row.x ?? 0),
-    y: Number(row.y ?? 0),
-    metrics: row.metrics ?? [],
-  };
-}
 function recomputeBuildingsFromResources(
   buildings: Building[],
   resources: ResourceNode[]
@@ -137,65 +121,83 @@ export function CampusProvider({ children }: { children: React.ReactNode }) {
   const [resources, setResources] = useState<ResourceNode[]>(INITIAL_RESOURCES);
   const [resourceLoading, setResourceLoading] = useState(true);
   const [resourceError, setResourceError] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [dbWarning, setDbWarning] = useState<string | null>(null);
+
+  const [edges, setEdges] = useState<ResourceEdge[]>(RESOURCE_EDGES);
   const [buildings, setBuildings] = useState<Building[]>(INITIAL_BUILDINGS);
   const [alerts, setAlerts] = useState<AlertItem[]>(INITIAL_ALERTS);
   const [recoveryTasks, setRecoveryTasks] = useState<RecoveryTask[]>(
     INITIAL_RECOVERY_TASKS
   );
+  const [simulationPresets, setSimulationPresets] =
+    useState<SimulationPreset[]>(SIMULATION_PRESETS);
   const [telemetry, setTelemetry] = useState<TelemetryPoint[]>(TELEMETRY_HISTORY);
   const [lastSimulation, setLastSimulation] = useState<SimulationResult | null>(
     null
   );
   const [preselectedSimResource, setPreselectedSimResource] =
     useState<ResourceId>('electricity');
-useEffect(() => {
-  let cancelled = false;
 
-  async function loadResources() {
-    try {
-      const { data, error } = await supabase
-        .from('resources')
-        .select('*')
-        .order('id');
+  const syncLockRef = useRef(false);
 
-      if (cancelled) return;
+  useEffect(() => {
+    let cancelled = false;
 
-      if (error) {
-        setResourceError(error.message);
-        return;
-      }
+    async function hydrateFromSupabase() {
+      try {
+        const hydrated = await fetchAllCampusData();
+        if (cancelled) return;
 
-      if (!data || data.length === 0) {
-        setResourceError('No resources found in Supabase.');
-        return;
-      }
+        if (hydrated.resources) {
+          setResources(hydrated.resources);
+        }
+        setResourceError(hydrated.resourceError);
 
-      setResources(
-        (data as ResourceRow[]).map(mapResourceRow)
-      );
+        if (hydrated.buildings) {
+          setBuildings(hydrated.buildings);
+        }
+        if (hydrated.edges) {
+          setEdges(hydrated.edges);
+        }
+        if (hydrated.alerts) {
+          setAlerts(hydrated.alerts);
+        }
+        if (hydrated.recoveryTasks) {
+          setRecoveryTasks(hydrated.recoveryTasks);
+        }
+        if (hydrated.presets) {
+          setSimulationPresets(hydrated.presets);
+        }
+        if (hydrated.telemetry) {
+          setTelemetry(hydrated.telemetry);
+        }
 
-      setResourceError(null);
-
-      console.log(`CampusGuard: Loaded ${data.length} resources from Supabase`);
-    } catch (err) {
-      if (!cancelled) {
-        setResourceError(
-          err instanceof Error ? err.message : 'Unable to load resources'
-        );
-      }
-    } finally {
-      if (!cancelled) {
-        setResourceLoading(false);
+        if (hydrated.warnings.length > 0) {
+          setDbWarning(hydrated.warnings[0]);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setResourceError(
+            err instanceof Error
+              ? err.message
+              : 'Unable to load CampusGuard data from Supabase'
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setResourceLoading(false);
+        }
       }
     }
-  }
 
-  loadResources();
+    hydrateFromSupabase();
 
-  return () => {
-    cancelled = true;
-  };
-}, []);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const healthScore = useMemo(
     () => calculateHealthScore(resources),
     [resources]
@@ -208,7 +210,7 @@ useEffect(() => {
   ): SimulationResult => {
     const result = runCascadingSimulation(
       resources,
-      RESOURCE_EDGES,
+      edges,
       buildings,
       resourceId,
       severity,
@@ -218,7 +220,12 @@ useEffect(() => {
     return result;
   };
 
-  const applySimulationToTwin = (result: SimulationResult) => {
+  const applySimulationToTwin = async (result: SimulationResult) => {
+    if (syncLockRef.current) return;
+    syncLockRef.current = true;
+    setIsSyncing(true);
+    setDbWarning(null);
+
     const waveMap = new Map(
       result.waves.map((w) => [w.resourceId, w.resultingStatus])
     );
@@ -238,10 +245,20 @@ useEffect(() => {
       };
     });
 
+    const changedResources = nextResources.filter((r, i) => {
+      const prev = resources[i];
+      return prev.status !== r.status || prev.loadPercent !== r.loadPercent;
+    });
+
     const nextBuildings = recomputeBuildingsFromResources(
       buildings,
       nextResources
     );
+
+    const changedBuildings = nextBuildings.filter((b, i) => {
+      const prev = buildings[i];
+      return prev.status !== b.status || prev.notes !== b.notes;
+    });
 
     const triggerNode = resources.find(
       (r) => r.id === result.triggerResourceId
@@ -251,9 +268,10 @@ useEffect(() => {
       minute: '2-digit',
     });
 
-    const newAlerts: AlertItem[] = [
+    const tempPrefix = `temp-${Date.now()}`;
+    const newAlertsDraft: AlertItem[] = [
       {
-        id: `sim-alert-${Date.now()}`,
+        id: `${tempPrefix}-root`,
         title: `Simulated ${result.triggerSeverity.toUpperCase()}: ${triggerNode?.name ?? result.triggerResourceId}`,
         severity: result.triggerSeverity === 'critical' ? 'critical' : 'warning',
         timestamp: 'Just now',
@@ -268,7 +286,7 @@ useEffect(() => {
         .filter((w) => w.wave > 0)
         .slice(0, 3)
         .map((w, idx) => ({
-          id: `sim-cascade-${Date.now()}-${idx}`,
+          id: `${tempPrefix}-wave-${idx}`,
           title: `Cascading Impact (Wave ${w.wave}): ${w.resourceName}`,
           severity: (w.resultingStatus === 'critical'
             ? 'critical'
@@ -285,9 +303,9 @@ useEffect(() => {
         })),
     ];
 
-    const newTasks: RecoveryTask[] = result.generatedTasks.map((t, idx) => ({
+    const newTasksDraft: RecoveryTask[] = result.generatedTasks.map((t, idx) => ({
       ...t,
-      id: `rec-sim-${Date.now()}-${idx}`,
+      id: `${tempPrefix}-task-${idx}`,
       status: idx === 0 ? 'in_progress' : 'pending',
     }));
 
@@ -297,39 +315,94 @@ useEffect(() => {
     const netLoad =
       nextResources.find((r) => r.id === 'internet')?.loadPercent ?? 64;
 
+    const newPoint: TelemetryPoint = {
+      time: nowLabel,
+      healthScore: nextScore,
+      powerLoad,
+      networkLoad: netLoad,
+    };
+
+    // Optimistic UI updates
     setResources(nextResources);
     setBuildings(nextBuildings);
-    setAlerts((prev) => [...newAlerts, ...prev]);
+    setAlerts((prev) => [...newAlertsDraft, ...prev]);
     setRecoveryTasks((prev) => {
-      const existingIds = new Set(newTasks.map((t) => t.resourceId));
+      const existingIds = new Set(newTasksDraft.map((t) => t.resourceId));
       const kept = prev.filter((t) => !existingIds.has(t.resourceId));
-      return [...newTasks, ...kept];
+      return [...newTasksDraft, ...kept];
     });
-    setTelemetry((prev) => [
-      ...prev.slice(-7),
-      {
-        time: nowLabel,
-        healthScore: nextScore,
-        powerLoad,
-        networkLoad: netLoad,
-      },
-    ]);
+    setTelemetry((prev) => [...prev.slice(-7), newPoint]);
+
+    // Persist changes to Supabase
+    try {
+      const warnings: string[] = [];
+
+      const [simErr, resErr, bldgErr, alertsRes, tasksRes, telRes] =
+        await Promise.all([
+          insertSimulationRecord(result),
+          updateChangedResources(changedResources),
+          updateChangedBuildings(changedBuildings),
+          insertAlertsToDb(newAlertsDraft),
+          syncRecoveryTasksFromSimulation(newTasksDraft, recoveryTasks),
+          insertTelemetryPointInDb(newPoint),
+        ]);
+
+      if (simErr) warnings.push(simErr);
+      if (resErr) warnings.push(resErr);
+      if (bldgErr) warnings.push(bldgErr);
+      if (alertsRes.error) warnings.push(alertsRes.error);
+      if (tasksRes.error) warnings.push(tasksRes.error);
+      if (telRes.error) warnings.push(telRes.error);
+
+      // Replace optimistic temp alert IDs with persisted UUIDs
+      if (alertsRes.rows.length > 0) {
+        const tempIds = new Set(newAlertsDraft.map((a) => a.id));
+        setAlerts((prev) => [
+          ...alertsRes.rows,
+          ...prev.filter((a) => !tempIds.has(a.id)),
+        ]);
+      }
+
+      if (!tasksRes.error && tasksRes.tasks.length > 0) {
+        setRecoveryTasks(tasksRes.tasks);
+      }
+
+      if (telRes.point) {
+        setTelemetry((prev) => [
+          ...prev.slice(0, -1),
+          telRes.point!,
+        ]);
+      }
+
+      if (warnings.length > 0) {
+        setDbWarning(warnings[0]);
+      }
+    } catch (err) {
+      setDbWarning(
+        err instanceof Error
+          ? err.message
+          : 'Failed to persist simulation changes to Supabase.'
+      );
+    } finally {
+      syncLockRef.current = false;
+      setIsSyncing(false);
+    }
   };
 
-  const advanceRecoveryTask = (taskId: string) => {
+  const advanceRecoveryTask = async (taskId: string) => {
     const target = recoveryTasks.find((t) => t.id === taskId);
-    if (!target) return;
+    if (!target || target.status === 'completed') return;
 
     const nextTaskStatus =
-      target.status === 'pending'
-        ? 'in_progress'
-        : target.status === 'in_progress'
-        ? 'completed'
-        : 'completed';
+      target.status === 'pending' ? 'in_progress' : 'completed';
 
     setRecoveryTasks((prev) =>
       prev.map((t) => (t.id === taskId ? { ...t, status: nextTaskStatus } : t))
     );
+
+    const warnings: string[] = [];
+    const statusErr = await updateRecoveryTaskStatusInDb(taskId, nextTaskStatus);
+    if (statusErr) warnings.push(statusErr);
 
     if (nextTaskStatus === 'completed') {
       const baselineRes = INITIAL_RESOURCES.find(
@@ -340,63 +413,146 @@ useEffect(() => {
           ? {
               ...r,
               status: 'operational' as StatusLevel,
-              loadPercent: baselineRes ? Math.min(baselineRes.loadPercent, 74) : 65,
+              loadPercent: baselineRes
+                ? Math.min(baselineRes.loadPercent, 74)
+                : 65,
             }
           : r
       );
+
+      const changedResources = nextResources.filter((r, i) => {
+        const prev = resources[i];
+        return prev.status !== r.status || prev.loadPercent !== r.loadPercent;
+      });
+
       const nextBuildings = recomputeBuildingsFromResources(
         buildings,
         nextResources
       );
+      const changedBuildings = nextBuildings.filter((b, i) => {
+        const prev = buildings[i];
+        return prev.status !== b.status || prev.notes !== b.notes;
+      });
+
+      const matchingAlertIds = alerts
+        .filter(
+          (a) =>
+            !a.acknowledged && a.affectedResources.includes(target.resourceId)
+        )
+        .map((a) => a.id);
+
       setResources(nextResources);
       setBuildings(nextBuildings);
-
-      setAlerts((prev) =>
-        prev.map((a) =>
-          a.affectedResources.includes(target.resourceId)
-            ? { ...a, acknowledged: true }
-            : a
-        )
-      );
+      if (matchingAlertIds.length > 0) {
+        const idSet = new Set(matchingAlertIds);
+        setAlerts((prev) =>
+          prev.map((a) => (idSet.has(a.id) ? { ...a, acknowledged: true } : a))
+        );
+      }
 
       const nextScore = calculateHealthScore(nextResources);
       const nowLabel = new Date().toLocaleTimeString([], {
         hour: '2-digit',
         minute: '2-digit',
       });
-      setTelemetry((prev) => [
-        ...prev.slice(-7),
-        {
-          time: nowLabel,
-          healthScore: nextScore,
-          powerLoad:
-            nextResources.find((r) => r.id === 'electricity')?.loadPercent ?? 70,
-          networkLoad:
-            nextResources.find((r) => r.id === 'internet')?.loadPercent ?? 60,
-        },
+      const newPoint: TelemetryPoint = {
+        time: nowLabel,
+        healthScore: nextScore,
+        powerLoad:
+          nextResources.find((r) => r.id === 'electricity')?.loadPercent ?? 70,
+        networkLoad:
+          nextResources.find((r) => r.id === 'internet')?.loadPercent ?? 60,
+      };
+
+      setTelemetry((prev) => [...prev.slice(-7), newPoint]);
+
+      const [resErr, bldgErr, alertErr, telRes] = await Promise.all([
+        updateChangedResources(changedResources),
+        updateChangedBuildings(changedBuildings),
+        acknowledgeResourceAlertsInDb(target.resourceId, matchingAlertIds),
+        insertTelemetryPointInDb(newPoint),
       ]);
+
+      if (resErr) warnings.push(resErr);
+      if (bldgErr) warnings.push(bldgErr);
+      if (alertErr) warnings.push(alertErr);
+      if (telRes.error) warnings.push(telRes.error);
+    }
+
+    if (warnings.length > 0) {
+      setDbWarning(warnings[0]);
     }
   };
 
-  const toggleAcknowledgeAlert = (alertId: string) => {
+  const toggleAcknowledgeAlert = async (alertId: string) => {
+    const existing = alerts.find((a) => a.id === alertId);
+    if (!existing) return;
+    const nextAck = !existing.acknowledged;
+
     setAlerts((prev) =>
       prev.map((a) =>
-        a.id === alertId ? { ...a, acknowledged: !a.acknowledged } : a
+        a.id === alertId ? { ...a, acknowledged: nextAck } : a
       )
     );
+
+    const err = await updateAlertAckInDb(alertId, nextAck);
+    if (err) {
+      // Revert optimistic update if Supabase rejects
+      setAlerts((prev) =>
+        prev.map((a) =>
+          a.id === alertId ? { ...a, acknowledged: existing.acknowledged } : a
+        )
+      );
+      setDbWarning(err);
+    }
   };
 
-  const dismissAlert = (alertId: string) => {
+  const dismissAlert = async (alertId: string) => {
+    const existing = alerts.find((a) => a.id === alertId);
+    if (!existing) return;
+
     setAlerts((prev) => prev.filter((a) => a.id !== alertId));
+
+    const err = await deleteAlertFromDb(alertId);
+    if (err) {
+      setAlerts((prev) => [existing, ...prev]);
+      setDbWarning(err);
+    }
   };
 
-  const resetDigitalTwin = () => {
+  const resetDigitalTwin = async () => {
+    if (syncLockRef.current) return;
+    syncLockRef.current = true;
+    setIsSyncing(true);
+    setDbWarning(null);
+
     setResources(INITIAL_RESOURCES);
     setBuildings(INITIAL_BUILDINGS);
     setAlerts(INITIAL_ALERTS);
     setRecoveryTasks(INITIAL_RECOVERY_TASKS);
     setTelemetry(TELEMETRY_HISTORY);
     setLastSimulation(null);
+
+    try {
+      const res = await resetTwinBaselineInDb(
+        INITIAL_RESOURCES,
+        INITIAL_BUILDINGS,
+        INITIAL_ALERTS,
+        INITIAL_RECOVERY_TASKS
+      );
+      if (res.alerts) setAlerts(res.alerts);
+      if (res.recoveryTasks) setRecoveryTasks(res.recoveryTasks);
+      if (res.warnings.length > 0) {
+        setDbWarning(res.warnings[0]);
+      }
+    } catch (err) {
+      setDbWarning(
+        err instanceof Error ? err.message : 'Failed to reset twin in Supabase.'
+      );
+    } finally {
+      syncLockRef.current = false;
+      setIsSyncing(false);
+    }
   };
 
   const jumpToSimulateResource = (resourceId: ResourceId) => {
@@ -406,16 +562,20 @@ useEffect(() => {
 
   return (
     <CampusContext.Provider
-    value={{
-  activePage,
-  setActivePage,
-  resources,
-  resourceLoading,
-  resourceError,
-  edges: RESOURCE_EDGES,
+      value={{
+        activePage,
+        setActivePage,
+        resources,
+        resourceLoading,
+        resourceError,
+        isSyncing,
+        dbWarning,
+        clearDbWarning: () => setDbWarning(null),
+        edges,
         buildings,
         alerts,
         recoveryTasks,
+        simulationPresets,
         telemetry,
         healthScore,
         lastSimulation,

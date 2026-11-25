@@ -151,8 +151,22 @@ export interface SimulationPreset {
 }
 
 export interface TelemetryPoint {
+  id?: number;
   time: string;
   healthScore: number;
   powerLoad: number;
   networkLoad: number;
+}
+
+export interface SimulationRecord {
+  id?: string;
+  triggerResourceId: ResourceId;
+  triggerSeverity: Exclude<StatusLevel, 'operational'>;
+  durationMinutes: number;
+  projectedHealthScore: number;
+  healthDrop: number;
+  summary: string;
+  affectedResources: ResourceId[];
+  affectedBuildings: string[];
+  createdAt?: string;
 }

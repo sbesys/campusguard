@@ -50,6 +50,14 @@ export function MapPage() {
   const selectedBuilding =
     buildings.find((b) => b.id === selectedBuildingId) ?? buildings[0];
 
+  if (!selectedBuilding) {
+    return (
+      <div className="rounded-2xl border border-slate-800 bg-[#0a162b] p-8 text-center text-sm text-slate-400">
+        No campus buildings available.
+      </div>
+    );
+  }
+
   const powerStatus = resourceMap.get('electricity')?.status ?? 'operational';
   const waterStatus = resourceMap.get('water')?.status ?? 'operational';
   const netStatus = resourceMap.get('internet')?.status ?? 'operational';

@@ -12,7 +12,6 @@ import { HealthGauge } from '../components/HealthGauge';
 import { ResourceIcon } from '../components/ResourceIcon';
 import { SeverityBadge, StatusBadge } from '../components/StatusBadge';
 import { TelemetryChart } from '../components/TelemetryChart';
-import { SIMULATION_PRESETS } from '../data/campusData';
 import { useCampus } from '../context/CampusContext';
 
 export function DashboardPage() {
@@ -22,7 +21,9 @@ export function DashboardPage() {
     buildings,
     alerts,
     recoveryTasks,
+    simulationPresets,
     telemetry,
+    isSyncing,
     setActivePage,
     runSimulationPreview,
     applySimulationToTwin,
@@ -39,14 +40,14 @@ export function DashboardPage() {
   const totalOccupancy = buildings.reduce((sum, b) => sum + b.occupancy, 0);
 
   const handleQuickDemoIncident = (presetId: string) => {
-    const preset = SIMULATION_PRESETS.find((p) => p.id === presetId);
+    const preset = simulationPresets.find((p) => p.id === presetId);
     if (!preset) return;
     const result = runSimulationPreview(
       preset.resourceId,
       preset.severity,
       preset.durationMinutes
     );
-    applySimulationToTwin(result);
+    void applySimulationToTwin(result);
   };
 
   return (
@@ -175,7 +176,8 @@ export function DashboardPage() {
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               onClick={() => handleQuickDemoIncident('preset-blackout')}
-              className="flex-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/25"
+              disabled={isSyncing}
+              className="flex-1 rounded-lg border border-rose-500/40 bg-rose-500/15 px-2.5 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/25 disabled:opacity-50"
             >
               Simulate Blackout
             </button>

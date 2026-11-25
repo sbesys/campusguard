@@ -67,6 +67,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
     resources,
     alerts,
     resetDigitalTwin,
+    resourceLoading,
+    resourceError,
+    isSyncing,
+    dbWarning,
+    clearDbWarning,
   } = useCampus();
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -216,11 +221,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {/* Bottom Reset & Campus Info */}
         <div className="border-t border-slate-800/80 p-4">
           <button
-            onClick={resetDigitalTwin}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-700/80 bg-[#0d1c36] px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-cyan-500/40 hover:bg-slate-800 hover:text-white"
+            onClick={() => void resetDigitalTwin()}
+            disabled={isSyncing}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-700/80 bg-[#0d1c36] px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-cyan-500/40 hover:bg-slate-800 hover:text-white disabled:opacity-50"
           >
-            <RotateCcw className="h-3.5 w-3.5 text-cyan-400" />
-            Reset Twin Baseline
+            <RotateCcw className={`h-3.5 w-3.5 text-cyan-400 ${isSyncing ? 'animate-spin' : ''}`} />
+            {isSyncing ? 'Syncing Twin...' : 'Reset Twin Baseline'}
           </button>
           <p className="mt-3 text-center text-[11px] text-slate-500">
             Apex Institute of Technology • 5,280 Campus Users
@@ -295,7 +301,35 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </header>
 
         {/* Page Body */}
-        <main className="flex-1 p-4 sm:p-6">{children}</main>
+        <main className="flex-1 p-4 sm:p-6">
+          {(resourceLoading || resourceError || dbWarning) && (
+            <div className="mb-4 space-y-2">
+              {resourceLoading && (
+                <div className="flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-2.5 text-xs text-cyan-200">
+                  <span className="h-2 w-2 animate-ping rounded-full bg-cyan-400" />
+                  Synchronizing digital twin state with Supabase...
+                </div>
+              )}
+              {resourceError && (
+                <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-200">
+                  Supabase resource warning: {resourceError} (displaying fallback dataset)
+                </div>
+              )}
+              {dbWarning && (
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-200">
+                  <span>{dbWarning}</span>
+                  <button
+                    onClick={clearDbWarning}
+                    className="rounded-md px-2 py-0.5 text-[11px] font-medium text-amber-100 hover:bg-amber-500/20"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+          {children}
+        </main>
       </div>
     </div>
   );

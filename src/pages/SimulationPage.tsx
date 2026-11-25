@@ -14,14 +14,16 @@ import {
 } from 'lucide-react';
 import { ResourceIcon } from '../components/ResourceIcon';
 import { StatusBadge } from '../components/StatusBadge';
-import { SIMULATION_PRESETS } from '../data/campusData';
 import { useCampus } from '../context/CampusContext';
 import { ResourceId, SimulationResult, StatusLevel } from '../types/campus';
 
 export function SimulationPage() {
   const {
     resources,
+    simulationPresets,
     healthScore,
+    resourceLoading,
+    isSyncing,
     preselectedSimResource,
     runSimulationPreview,
     applySimulationToTwin,
@@ -44,8 +46,9 @@ export function SimulationPage() {
     setSelectedResource(preselectedSimResource);
   }, [preselectedSimResource]);
 
-  // Run an initial visible preview on mount so the page is immediately rich & interactive
+  // Recompute preview when Supabase finishes loading resources/edges/buildings
   useEffect(() => {
+    if (resources.length === 0) return;
     const initial = runSimulationPreview(
       selectedResource,
       severity,
@@ -53,7 +56,7 @@ export function SimulationPage() {
     );
     setPreviewResult(initial);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [resourceLoading]);
 
   const handleRunPreview = (
     resId: ResourceId = selectedResource,
@@ -66,7 +69,7 @@ export function SimulationPage() {
   };
 
   const handlePresetClick = (presetId: string) => {
-    const preset = SIMULATION_PRESETS.find((p) => p.id === presetId);
+    const preset = simulationPresets.find((p) => p.id === presetId);
     if (!preset) return;
     setSelectedResource(preset.resourceId);
     setSeverity(preset.severity);
@@ -74,9 +77,9 @@ export function SimulationPage() {
     handleRunPreview(preset.resourceId, preset.severity, preset.durationMinutes);
   };
 
-  const handleApplyToTwin = () => {
-    if (!previewResult) return;
-    applySimulationToTwin(previewResult);
+  const handleApplyToTwin = async () => {
+    if (!previewResult || isSyncing) return;
+    await applySimulationToTwin(previewResult);
     setAppliedBanner(true);
   };
 
@@ -130,7 +133,7 @@ export function SimulationPage() {
               Quick Demo Scenarios
             </label>
             <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-1">
-              {SIMULATION_PRESETS.map((preset) => (
+              {simulationPresets.map((preset) => (
                 <button
                   key={preset.id}
                   onClick={() => handlePresetClick(preset.id)}
@@ -255,12 +258,12 @@ export function SimulationPage() {
               Recalculate Cascade
             </button>
             <button
-              onClick={handleApplyToTwin}
-              disabled={!previewResult}
+              onClick={() => void handleApplyToTwin()}
+              disabled={!previewResult || isSyncing}
               className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-rose-600 to-amber-600 px-4 py-2.5 text-xs font-semibold text-white shadow-lg shadow-rose-500/20 transition hover:brightness-110 disabled:opacity-50"
             >
               <Flame className="h-4 w-4" />
-              Apply to Live Twin
+              {isSyncing ? 'Saving Simulation...' : 'Apply to Live Twin'}
             </button>
           </div>
         </div>
