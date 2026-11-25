@@ -1,4 +1,11 @@
-import React, { createContext, useContext, useMemo, useState } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useMemo,
+  useState,
+  useEffect,
+} from 'react';
+import { supabase } from '../lib/supabase';
 import {
   INITIAL_ALERTS,
   INITIAL_BUILDINGS,
@@ -28,6 +35,8 @@ interface CampusContextValue {
   activePage: PageId;
   setActivePage: (page: PageId) => void;
   resources: ResourceNode[];
+  resourceLoading: boolean;
+resourceError: string | null;
   edges: ResourceEdge[];
   buildings: Building[];
   alerts: AlertItem[];
@@ -57,7 +66,43 @@ const STATUS_RANK: Record<StatusLevel, number> = {
   degraded: 1,
   critical: 2,
 };
+interface ResourceRow {
+  id: string;
+  name: string;
+  status: string | null;
+  load_percent: number | null;
+  location: string | null;
+  description: string | null;
+  short_name: string | null;
+  category: string | null;
+  capacity_label: string | null;
+  backup_buffer_minutes: number | null;
+  criticality_weight: number | null;
+  owner_unit: string | null;
+  x: number | null;
+  y: number | null;
+  metrics: { label: string; value: string }[] | null;
+}
 
+function mapResourceRow(row: ResourceRow): ResourceNode {
+  return {
+    id: row.id as ResourceId,
+    name: row.name,
+    shortName: row.short_name ?? row.name,
+    category: row.category as ResourceNode['category'],
+    status: (row.status ?? 'operational') as StatusLevel,
+    loadPercent: row.load_percent ?? 0,
+    capacityLabel: row.capacity_label ?? '',
+    backupBufferMinutes: row.backup_buffer_minutes ?? 0,
+    criticalityWeight: Number(row.criticality_weight ?? 0),
+    ownerUnit: row.owner_unit ?? '',
+    location: row.location ?? '',
+    description: row.description ?? '',
+    x: Number(row.x ?? 0),
+    y: Number(row.y ?? 0),
+    metrics: row.metrics ?? [],
+  };
+}
 function recomputeBuildingsFromResources(
   buildings: Building[],
   resources: ResourceNode[]
@@ -90,6 +135,8 @@ function recomputeBuildingsFromResources(
 export function CampusProvider({ children }: { children: React.ReactNode }) {
   const [activePage, setActivePage] = useState<PageId>('dashboard');
   const [resources, setResources] = useState<ResourceNode[]>(INITIAL_RESOURCES);
+  const [resourceLoading, setResourceLoading] = useState(true);
+  const [resourceError, setResourceError] = useState<string | null>(null);
   const [buildings, setBuildings] = useState<Building[]>(INITIAL_BUILDINGS);
   const [alerts, setAlerts] = useState<AlertItem[]>(INITIAL_ALERTS);
   const [recoveryTasks, setRecoveryTasks] = useState<RecoveryTask[]>(
@@ -101,7 +148,54 @@ export function CampusProvider({ children }: { children: React.ReactNode }) {
   );
   const [preselectedSimResource, setPreselectedSimResource] =
     useState<ResourceId>('electricity');
+useEffect(() => {
+  let cancelled = false;
 
+  async function loadResources() {
+    try {
+      const { data, error } = await supabase
+        .from('resources')
+        .select('*')
+        .order('id');
+
+      if (cancelled) return;
+
+      if (error) {
+        setResourceError(error.message);
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        setResourceError('No resources found in Supabase.');
+        return;
+      }
+
+      setResources(
+        (data as ResourceRow[]).map(mapResourceRow)
+      );
+
+      setResourceError(null);
+
+      console.log(`CampusGuard: Loaded ${data.length} resources from Supabase`);
+    } catch (err) {
+      if (!cancelled) {
+        setResourceError(
+          err instanceof Error ? err.message : 'Unable to load resources'
+        );
+      }
+    } finally {
+      if (!cancelled) {
+        setResourceLoading(false);
+      }
+    }
+  }
+
+  loadResources();
+
+  return () => {
+    cancelled = true;
+  };
+}, []);
   const healthScore = useMemo(
     () => calculateHealthScore(resources),
     [resources]
@@ -312,11 +406,13 @@ export function CampusProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <CampusContext.Provider
-      value={{
-        activePage,
-        setActivePage,
-        resources,
-        edges: RESOURCE_EDGES,
+    value={{
+  activePage,
+  setActivePage,
+  resources,
+  resourceLoading,
+  resourceError,
+  edges: RESOURCE_EDGES,
         buildings,
         alerts,
         recoveryTasks,
